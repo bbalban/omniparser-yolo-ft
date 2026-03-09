@@ -2,68 +2,67 @@
 
 Practical pipeline to improve OmniParser on XFCE desktop UI elements:
 
-1. Capture desktop screenshots for target tasks.
-2. Auto-label with a VLM into bounding-box JSON.
-3. Render overlays so a human can quickly fix boxes/classes.
-4. Export training data for YOLO icon detection.
-5. Fine-tune Florence-2 with QLoRA on icon/text descriptions.
-6. Package artifacts to deploy into the Retina VM.
-
-This repository is intentionally self-contained and only modifies files under
-`omniparser-finetune/`.
+1. **Capture** desktop screenshots automatically (launches XFCE apps + dialogs).
+2. **Auto-label** with a VLM into bounding-box JSON.
+3. **Review & fix** labels in a visual web UI (drag/resize/delete/add boxes).
+4. **Export** training data for YOLO icon detection + Florence-2.
+5. **Train** on a Lambda GPU VM (YOLO transfer learning, optional Florence-2 QLoRA).
+6. **Deploy** artifacts to the Retina VM.
 
 ## What is included
 
-- `docs/PLAN.md`: step-by-step execution plan for 10-shot bootstrap.
-- `docs/DATA_FORMAT.md`: dataset schema and class taxonomy.
-- `scripts/download_upstreams.sh`: fetch upstream open-source repos/tools.
-- `scripts/capture_xfce_screenshots.py`: automated screenshot capture loop.
-- `scripts/label_with_vlm.py`: auto-label screenshots via OpenAI-compatible VLM.
-- `scripts/render_overlays.py`: render labeled boxes on top of screenshots.
-- `scripts/export_yolo_dataset.py`: convert reviewed labels to YOLO format.
-- `scripts/train_yolo.py`: YOLO fine-tuning entrypoint.
-- `scripts/train_florence2_qlora.py`: Florence-2 QLoRA fine-tuning entrypoint.
-- `scripts/package_retina_artifacts.py`: package trained weights for Retina VM.
-- `Makefile`: one-command helpers for bootstrap and 10-shot runs.
+| File | Purpose |
+|------|---------|
+| `PLAN.md` | Step-by-step execution plan |
+| `DATA_FORMAT.md` | Label JSON schema and class taxonomy |
+| `configs/classes.yaml` | XFCE UI element class list |
+| `scripts/capture_xfce_screenshots.py` | Automated XFCE app launch + screenshot capture |
+| `scripts/label_with_vlm.py` | Auto-label screenshots via OpenAI-compatible VLM |
+| `scripts/review_labels.py` | Web UI for visual bounding-box review and correction |
+| `scripts/export_yolo_dataset.py` | Convert reviewed labels to YOLO + Florence formats |
+| `scripts/download_upstreams.sh` | Fetch upstream repos (OmniParser, ultralytics, etc.) |
+| `requirements.txt` | Python dependencies |
 
 ## Quick start (10-shot)
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
+# Setup
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+bash scripts/download_upstreams.sh
 
-# 0) Pull upstream repos/tools
-make download-tools
+# 1) Capture 10 screenshots (run inside XFCE session with $DISPLAY set)
+python scripts/capture_xfce_screenshots.py --count 10
 
-# 1) Capture 10 screenshots (run inside XFCE session)
-make capture-10
+# 2) Auto-label with VLM
+export OPENAI_API_KEY=sk-...
+python scripts/label_with_vlm.py
 
-# 2) Auto-label with VLM (requires OPENAI_API_KEY and OPENAI_MODEL)
-make autolabel-10
-
-# 3) Render overlays and manually fix JSON labels as needed
-make overlays
+# 3) Review & fix labels in browser
+python scripts/review_labels.py --port 5555
+#   → open http://localhost:5555
+#   → drag/resize/delete/add boxes, change classes, Save each image
 
 # 4) Export YOLO dataset
-make export-yolo
+python scripts/export_yolo_dataset.py
 ```
 
-Then run training on a GPU machine/VM:
+## Training (on GPU VM)
 
 ```bash
-# YOLO
+# YOLO fine-tuning (transfer learning from OmniParser pretrained weights)
+pip install ultralytics
 python scripts/train_yolo.py --data data/final/yolo/dataset.yaml --epochs 40 --imgsz 1280
 
-# Florence-2 QLoRA
+# Florence-2 QLoRA (optional, only if captions are the bottleneck)
+pip install transformers peft bitsandbytes accelerate
 python scripts/train_florence2_qlora.py \
   --train-jsonl data/final/florence/train.jsonl \
   --output-dir artifacts/florence2-qlora
 ```
 
-## Notes on VM integration
+## VM integration
 
-- You can reuse the outer project's Lambda scripts from `../scripts/`.
-- This repo produces artifacts in `artifacts/` that can be copied to Retina VM.
-- Deployment/integration into Retina inference code can be done by your other
-  agent once weights are validated.
+- Reuse Lambda launch scripts from `../scripts/lambda_manager.py`.
+- This repo produces artifacts in `artifacts/` to copy to Retina VM.
+- Deployment into Retina inference code is handled by the other agent.

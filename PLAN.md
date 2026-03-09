@@ -28,19 +28,34 @@ Deliverable: runnable data pipeline in this repo.
 
 ## Phase 1: 10-shot data loop
 
-1. Run `scripts/capture_xfce_screenshots.py` for exactly 10 screenshots.
-2. Run `scripts/label_with_vlm.py` to generate initial box JSON labels.
-3. Run `scripts/render_overlays.py` to create reviewable images with boxes.
-4. Human review pass:
-   - Edit JSON boxes/classes directly.
-   - Re-render overlays to confirm fixes.
-5. Export YOLO dataset with `scripts/export_yolo_dataset.py`.
+```bash
+# Step 1 — Capture 10 XFCE screenshots (run inside XFCE X session)
+python scripts/capture_xfce_screenshots.py --count 10
+
+# Step 2 — Auto-label with VLM (requires OPENAI_API_KEY)
+python scripts/label_with_vlm.py
+
+# Step 3 — Review & fix labels in browser (drag/resize/delete/add boxes)
+python scripts/review_labels.py --port 5555
+#   → open http://localhost:5555, fix boxes, click Save per image
+
+# Step 4 — Export to YOLO + Florence format
+python scripts/export_yolo_dataset.py
+```
+
+The capture script launches 10 XFCE scenarios automatically:
+mousepad save-as, thunar browsing, context menus, settings panels,
+terminal, edit menus, appearance dialog, rename dialog, find/replace,
+and clean desktop.
+
+The review tool is a web UI where you visually drag/resize/delete/add
+bounding boxes and change class labels — no JSON editing needed.
 
 Deliverables:
 - `data/raw/screenshots/*.png`
-- `data/labels/reviewed/*.json`
-- `data/review/overlays/*.png`
-- `data/final/yolo/*`
+- `data/labels/reviewed/*.json` (human-corrected)
+- `data/final/yolo/` (YOLO dataset + dataset.yaml)
+- `data/final/florence/train.jsonl`
 
 ## Phase 2: Training on Retina GPU VM
 
@@ -67,15 +82,23 @@ Deliverables:
 3. Package artifacts: `scripts/package_retina_artifacts.py`.
 4. Hand off artifacts + config mapping to Retina integration agent.
 
-## Human-in-the-loop review recommendation
+## Human-in-the-loop review workflow
 
-For your workflow, the fastest correction method is:
+The review tool (`scripts/review_labels.py`) serves a web UI at
+http://localhost:5555 with these features:
 
-1. Keep canonical labels as JSON.
-2. Always render overlays after every edit.
-3. Review from images, edit JSON coordinates, re-render until correct.
+- **Move boxes**: click and drag any box
+- **Resize boxes**: drag corner handles on selected box
+- **Delete boxes**: select a box and press Delete or click Delete button
+- **Draw new boxes**: click "+ Draw Box", then click-drag on the image
+- **Change class**: select a box, pick new class from dropdown
+- **Save**: click Save (or Ctrl+S) to write corrected JSON
+- **Navigate**: arrow keys or Prev/Next buttons
 
-If volume grows, migrate to Label Studio or CVAT and export back to JSON/YOLO.
+Keyboard shortcuts: `[`/`]` or arrows = prev/next, `n` = draw mode,
+`Delete` = remove selected, `Ctrl+S` = save.
+
+If volume grows past ~50 images, migrate to Label Studio or CVAT.
 
 ## Scale-up path after 10-shot
 

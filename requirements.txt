@@ -1,0 +1,16 @@
+# Core dependencies for the omniparser-finetune pipeline
+flask
+pillow
+pyyaml
+openai
+
+# YOLO training (install on GPU VM)
+# ultralytics
+
+# Florence-2 QLoRA training (install on GPU VM)
+# transformers
+# peft
+# bitsandbytes
+# accelerate
+# torch
+# datasets
