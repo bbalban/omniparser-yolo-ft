@@ -32,14 +32,55 @@ def image_to_data_url(path: Path) -> str:
 
 def parse_json(text: str) -> dict[str, Any]:
     text = text.strip()
+    # Strip markdown code fences if present
+    text = re.sub(r"^```(?:json)?\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
+    text = text.strip()
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
     match = re.search(r"\{.*\}", text, re.DOTALL)
     if not match:
-        raise ValueError("VLM output does not contain JSON object.")
-    return json.loads(match.group(0))
+        raise ValueError(f"VLM output does not contain JSON object: {text[:200]}")
+    raw = match.group(0)
+    # Try to fix trailing commas before } or ]
+    raw = re.sub(r",\s*([}\]])", r"\1", raw)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    # Try to repair truncated JSON by closing open brackets
+    repaired = raw.rstrip().rstrip(",")
+    open_braces = repaired.count("{") - repaired.count("}")
+    open_brackets = repaired.count("[") - repaired.count("]")
+    # Remove any trailing incomplete object (no closing brace)
+    if open_braces > 0:
+        last_complete = repaired.rfind("}")
+        if last_complete > 0:
+            repaired = repaired[:last_complete + 1]
+            open_braces = repaired.count("{") - repaired.count("}")
+            open_brackets = repaired.count("[") - repaired.count("]")
+    repaired = repaired.rstrip().rstrip(",")
+    repaired += "]" * open_brackets + "}" * open_braces
+    repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
+    try:
+        return json.loads(repaired)
+    except json.JSONDecodeError:
+        pass
+
+    # Last resort: extract individual complete object dicts
+    obj_pattern = re.finditer(r'\{[^{}]*"class"[^{}]*"bbox_xyxy"[^{}]*\}', raw, re.DOTALL)
+    objects = []
+    for m in obj_pattern:
+        try:
+            objects.append(json.loads(m.group(0)))
+        except json.JSONDecodeError:
+            continue
+    if objects:
+        return {"objects": objects}
+
+    raise ValueError(f"Could not parse VLM JSON: {raw[:300]}")
 
 
 def clamp_bbox_xyxy(bbox: list[float], width: int, height: int) -> list[int]:
@@ -63,6 +104,7 @@ def main() -> None:
     parser.add_argument("--model", type=str, default=os.getenv("OPENAI_MODEL", "gpt-4.1"))
     parser.add_argument("--base-url", type=str, default=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"))
     parser.add_argument("--limit", type=int, default=0, help="0 means all images.")
+    parser.add_argument("--skip", type=str, nargs="*", default=[], help="Filenames to skip.")
     args = parser.parse_args()
 
     api_key = os.getenv("OPENAI_API_KEY")
@@ -81,58 +123,94 @@ def main() -> None:
         print("[label] No images found.")
         return
 
+    skip_set = set(args.skip)
+    images = [p for p in images if p.name not in skip_set]
+
     for image_path in images:
         with Image.open(image_path) as im:
             width, height = im.size
         data_url = image_to_data_url(image_path)
-        prompt = f"""
-You are labeling XFCE desktop UI elements for object detection.
-Allowed classes: {classes}
+        prompt = f"""\
+You are a precise UI element annotator for YOLO training data. Detect all INTERACTIVE elements in this {width}x{height} pixel XFCE desktop screenshot.
 
-Return strict JSON object with:
+Every detected element gets the same class: "icon"
+
+Return ONLY valid JSON (no markdown fences, no explanation):
 {{
   "objects": [
     {{
       "id": "obj-1",
-      "class": "one class from allowed list",
+      "class": "icon",
       "bbox_xyxy": [x1, y1, x2, y2],
-      "text": "visible text or empty"
+      "text": "visible text on the element or empty"
     }}
   ]
 }}
 
-Constraints:
-- Use integer pixel coordinates.
-- Keep only visible actionable UI elements.
-- Do not include objects outside image bounds ({width}x{height}).
-- No markdown, no explanation, JSON only.
-"""
-        resp = client.responses.create(
-            model=args.model,
-            input=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "input_text", "text": prompt},
-                        {"type": "input_image", "image_url": data_url},
+What to detect (all as class "icon"):
+- Buttons (Save, Cancel, OK, Close, any clickable button)
+- Text input fields, filename inputs, search boxes, address bars
+- Menu bar items (File, Edit, View, Help)
+- Dropdown menu entries
+- Toolbar buttons (back, forward, up, home, refresh, icons in toolbars)
+- Tab headers
+- Checkboxes, radio buttons, toggle switches
+- Sidebar navigation items (Home, Desktop, Documents, etc.)
+- Window control buttons (close X, minimize, maximize)
+- Desktop shortcut icons
+- Scrollbar arrows and thumbs
+- Any other clickable or typeable UI element
+
+What NOT to detect:
+- Static text, paragraphs, or labels that are not clickable
+- Window borders/frames
+- Status bar text
+- Background, wallpaper, shadows
+- File content displayed inside editors
+
+CRITICAL rules for accuracy:
+- bbox_xyxy = [left, top, right, bottom] in EXACT integer pixel coordinates.
+- The bounding box must TIGHTLY wrap each element's visible border. No padding.
+- Only label elements from the FOREGROUND window (topmost/active). Ignore background windows.
+- Image is {width}x{height} pixels. All coordinates must be 0 <= x < {width}, 0 <= y < {height}.
+- No trailing commas. Return valid JSON only."""
+
+        parsed = None
+        for attempt in range(3):
+            try:
+                resp = client.chat.completions.create(
+                    model=args.model,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {"type": "image_url", "image_url": {"url": data_url}},
+                            ],
+                        }
                     ],
-                }
-            ],
-        )
-        parsed = parse_json(resp.output_text)
+                    max_tokens=8192,
+                )
+                raw_text = resp.choices[0].message.content
+                parsed = parse_json(raw_text)
+                break
+            except Exception as e:
+                print(f"  [label] attempt {attempt+1}/3 failed for {image_path.name}: {e}")
+                if attempt == 2:
+                    print(f"  [label] SKIPPING {image_path.name}")
+        if parsed is None:
+            continue
         objects = parsed.get("objects", [])
         cleaned = []
+        target_class = classes[0]  # single-class: always use first class
         for idx, obj in enumerate(objects, start=1):
-            cls = str(obj.get("class", "")).strip()
-            if cls not in classes:
-                continue
             bbox = obj.get("bbox_xyxy", [])
             if not isinstance(bbox, list) or len(bbox) != 4:
                 continue
             cleaned.append(
                 {
                     "id": str(obj.get("id", f"obj-{idx}")),
-                    "class": cls,
+                    "class": target_class,
                     "bbox_xyxy": clamp_bbox_xyxy([float(v) for v in bbox], width, height),
                     "text": str(obj.get("text", "")),
                     "source": "vlm",

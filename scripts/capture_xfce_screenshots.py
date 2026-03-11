@@ -106,53 +106,63 @@ SCENARIOS: List[Scenario] = [
         ],
         cleanup_cmd="pkill -f mousepad || true",
     ),
-    # 7) XFCE appearance settings (checkboxes, dropdowns)
+    # 7) Gedit - Save As dialog (has filename input + Save button)
     Scenario(
-        name="xfce_appearance",
-        launch_cmd="xfce4-appearance-settings &",
+        name="gedit_save_as",
+        launch_cmd="gedit &",
         steps=[
-            ScenarioStep("Wait for appearance dialog", [], wait_after=2.0),
+            ScenarioStep("Wait for gedit to load", [], wait_after=3.0),
+            ScenarioStep("Type content so Save is active", [
+                "xdotool type --delay 40 'This is a test document for training data.'",
+            ], wait_after=1.0),
+            ScenarioStep("Open Save As dialog (Ctrl+Shift+S)", [
+                "xdotool key ctrl+shift+s",
+            ], wait_after=2.5),
         ],
-        cleanup_cmd="pkill -f xfce4-appearance || true",
+        cleanup_cmd="pkill -f gedit || true",
     ),
-    # 8) Thunar rename dialog (F2 on a file)
+    # 8) Mousepad - Save dialog with filename input
     Scenario(
-        name="thunar_rename",
-        launch_cmd="thunar ~ &",
-        steps=[
-            ScenarioStep("Wait for Thunar", [], wait_after=2.0),
-            ScenarioStep("Click on first item area and press F2", [
-                "xdotool mousemove 400 300 click 1",
-            ], wait_after=0.8),
-            ScenarioStep("Press F2 to rename", [
-                "xdotool key F2",
-            ], wait_after=1.5),
-        ],
-        cleanup_cmd="pkill -f thunar || true",
-    ),
-    # 9) Mousepad Find/Replace dialog
-    Scenario(
-        name="mousepad_find_replace",
+        name="mousepad_save_dialog",
         launch_cmd="mousepad &",
         steps=[
-            ScenarioStep("Type some text first", [
-                "xdotool type --delay 30 'search target text'",
-            ], wait_after=0.8),
-            ScenarioStep("Open Find and Replace (Ctrl+H)", [
-                "xdotool key ctrl+h",
-            ], wait_after=1.5),
+            ScenarioStep("Type content", [
+                "xdotool type --delay 40 'Important document content here.'",
+            ], wait_after=1.0),
+            ScenarioStep("Open Save dialog (Ctrl+S)", [
+                "xdotool key ctrl+s",
+            ], wait_after=2.5),
         ],
         cleanup_cmd="pkill -f mousepad || true",
     ),
-    # 10) Clean desktop (panel, wallpaper only)
+    # 9) Gedit - Close without saving dialog (Don't Save / Cancel / Save buttons)
     Scenario(
-        name="clean_desktop",
-        launch_cmd="true",
+        name="gedit_close_unsaved",
+        launch_cmd="gedit &",
         steps=[
-            ScenarioStep("Minimize all windows", [
-                "wmctrl -k on 2>/dev/null || xdotool key super+d || true",
-            ], wait_after=1.5),
+            ScenarioStep("Wait for gedit to load", [], wait_after=3.0),
+            ScenarioStep("Type content to make it unsaved", [
+                "xdotool type --delay 40 'Unsaved changes in this file.'",
+            ], wait_after=1.0),
+            ScenarioStep("Try to close window to trigger save prompt", [
+                "xdotool key alt+F4",
+            ], wait_after=2.5),
         ],
+        cleanup_cmd="pkill -f gedit || true",
+    ),
+    # 10) Mousepad - Close without saving dialog
+    Scenario(
+        name="mousepad_close_unsaved",
+        launch_cmd="mousepad &",
+        steps=[
+            ScenarioStep("Type content to make it unsaved", [
+                "xdotool type --delay 40 'Data that has not been saved yet.'",
+            ], wait_after=1.0),
+            ScenarioStep("Try to close to trigger save prompt", [
+                "xdotool key alt+F4",
+            ], wait_after=2.5),
+        ],
+        cleanup_cmd="pkill -f mousepad || true",
     ),
 ]
 

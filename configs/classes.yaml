@@ -1,13 +1,2 @@
 classes:
-  - button_save
-  - button_cancel
-  - input_filename
-  - input_text
-  - menu_item
-  - tab
-  - checkbox
-  - radio
-  - icon_file
-  - icon_folder
-  - window_titlebar
-  - dialog
+- icon

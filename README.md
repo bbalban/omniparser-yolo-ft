@@ -1,47 +1,48 @@
 # omniparser-finetune
 
-Practical pipeline to improve OmniParser on XFCE desktop UI elements:
+Fine-tune OmniParser's YOLOv8 icon detector for XFCE desktop UI elements.
 
-1. **Capture** desktop screenshots automatically (launches XFCE apps + dialogs).
-2. **Auto-label** with a VLM into bounding-box JSON.
-3. **Review & fix** labels in a visual web UI (drag/resize/delete/add boxes).
-4. **Export** training data for YOLO icon detection + Florence-2.
-5. **Train** on a Lambda GPU VM (YOLO transfer learning, optional Florence-2 QLoRA).
-6. **Deploy** artifacts to the Retina VM.
+## Pipeline
 
-## What is included
+1. **Capture** XFCE screenshots (automated + manual via `scrot`)
+2. **Auto-label** with Gemini 2.5 Pro VLM (single class: `icon`)
+3. **Review & fix** labels in a visual web UI (draw/drag/resize/delete boxes)
+4. **Export** to YOLO training format
+5. **Train** on a Lambda GPU VM (transfer learning from OmniParser weights)
+6. **Test** from client VM via Retina API
+7. **Deploy** fine-tuned weights to Retina VM
+
+## Files
 
 | File | Purpose |
 |------|---------|
-| `PLAN.md` | Step-by-step execution plan |
-| `DATA_FORMAT.md` | Label JSON schema and class taxonomy |
-| `configs/classes.yaml` | XFCE UI element class list |
+| `TRAINING_PLAN.md` | Step-by-step training and deployment plan |
+| `PLAN.md` | Original detailed execution plan |
+| `DATA_FORMAT.md` | Label JSON schema |
+| `configs/classes.yaml` | Class list (single class: `icon`) |
 | `scripts/capture_xfce_screenshots.py` | Automated XFCE app launch + screenshot capture |
-| `scripts/label_with_vlm.py` | Auto-label screenshots via OpenAI-compatible VLM |
-| `scripts/review_labels.py` | Web UI for visual bounding-box review and correction |
-| `scripts/export_yolo_dataset.py` | Convert reviewed labels to YOLO + Florence formats |
-| `scripts/download_upstreams.sh` | Fetch upstream repos (OmniParser, ultralytics, etc.) |
-| `requirements.txt` | Python dependencies |
+| `scripts/label_with_vlm.py` | Auto-label via Gemini/OpenAI-compatible VLM |
+| `scripts/review_labels.py` | Web UI for bounding-box review and correction |
+| `scripts/export_yolo_dataset.py` | Convert reviewed labels to YOLO format |
+| `scripts/train_yolo.py` | YOLOv8 fine-tuning script (run on GPU VM) |
+| `scripts/test_finetuned_model.py` | Test model via Retina API or local weights |
 
-## Quick start (10-shot)
+## Quick start
 
 ```bash
-# Setup
-python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-bash scripts/download_upstreams.sh
 
-# 1) Capture 10 screenshots (run inside XFCE session with $DISPLAY set)
+# 1) Capture screenshots (inside XFCE session)
 python scripts/capture_xfce_screenshots.py --count 10
 
 # 2) Auto-label with VLM
-export OPENAI_API_KEY=sk-...
-python scripts/label_with_vlm.py
+export OPENAI_API_KEY=<your-gemini-or-openai-key>
+python scripts/label_with_vlm.py --model gemini-2.5-pro \
+  --base-url "https://generativelanguage.googleapis.com/v1beta/openai/"
 
-# 3) Review & fix labels in browser
+# 3) Review labels in browser
 python scripts/review_labels.py --port 5555
-#   → open http://localhost:5555
-#   → drag/resize/delete/add boxes, change classes, Save each image
+# Open http://localhost:5555, press N to draw, Ctrl+S to save
 
 # 4) Export YOLO dataset
 python scripts/export_yolo_dataset.py
@@ -50,19 +51,20 @@ python scripts/export_yolo_dataset.py
 ## Training (on GPU VM)
 
 ```bash
-# YOLO fine-tuning (transfer learning from OmniParser pretrained weights)
 pip install ultralytics
-python scripts/train_yolo.py --data data/final/yolo/dataset.yaml --epochs 40 --imgsz 1280
-
-# Florence-2 QLoRA (optional, only if captions are the bottleneck)
-pip install transformers peft bitsandbytes accelerate
-python scripts/train_florence2_qlora.py \
-  --train-jsonl data/final/florence/train.jsonl \
-  --output-dir artifacts/florence2-qlora
+python scripts/train_yolo.py
 ```
 
-## VM integration
+See `TRAINING_PLAN.md` for full deployment steps.
 
-- Reuse Lambda launch scripts from `../scripts/lambda_manager.py`.
-- This repo produces artifacts in `artifacts/` to copy to Retina VM.
-- Deployment into Retina inference code is handled by the other agent.
+## Testing (from client VM)
+
+```bash
+python scripts/test_finetuned_model.py --retina-url http://<RETINA_IP>:8000
+```
+
+## Dataset stats
+
+- 18 reviewed images, 1304 bounding boxes
+- Train/val split: 17/5 images
+- Single class: `icon` (all interactive UI elements)

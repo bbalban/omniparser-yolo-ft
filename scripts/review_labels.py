@@ -72,6 +72,21 @@ def api_classes():
     return jsonify(load_classes())
 
 
+@app.route("/api/classes", methods=["POST"])
+def api_add_class():
+    import yaml
+    data = request.get_json(force=True)
+    new_class = str(data.get("class", "")).strip()
+    if not new_class:
+        return jsonify({"ok": False, "error": "empty class name"}), 400
+    current = load_classes()
+    if new_class in current:
+        return jsonify({"ok": True, "classes": current})
+    current.append(new_class)
+    CLASSES_FILE.write_text(yaml.dump({"classes": current}, default_flow_style=False))
+    return jsonify({"ok": True, "classes": current})
+
+
 @app.route("/api/labels/<image_name>")
 def api_get_labels(image_name: str):
     lp = label_path_for(image_name)
@@ -88,6 +103,20 @@ def api_save_labels(image_name: str):
     out = REVIEWED_DIR / f"{stem}.json"
     out.write_text(json.dumps(data, indent=2))
     return jsonify({"ok": True, "path": str(out)})
+
+
+@app.route("/api/images/<image_name>", methods=["DELETE"])
+def api_delete_image(image_name: str):
+    img_path = SCREENSHOTS_DIR / image_name
+    stem = Path(image_name).stem
+    auto_label = AUTO_LABELS_DIR / f"{stem}.json"
+    reviewed_label = REVIEWED_DIR / f"{stem}.json"
+    deleted = []
+    for p in [img_path, auto_label, reviewed_label]:
+        if p.exists():
+            p.unlink()
+            deleted.append(str(p.name))
+    return jsonify({"ok": True, "deleted": deleted})
 
 
 @app.route("/screenshots/<path:name>")
@@ -121,11 +150,12 @@ body { font-family: system-ui, sans-serif; background: #1a1a2e; color: #eee; dis
 #btn-prev:hover, #btn-next:hover { background: #1a4a8a; }
 #btn-add { background: #e17055; color: #fff; }
 #btn-delete { background: #d63031; color: #fff; }
+#btn-undo { background: #636e72; color: #fff; }
+#btn-undo:hover { background: #4a5568; }
 #class-select { padding: 4px 8px; border-radius: 4px; font-size: 13px; }
 #status { margin-left: auto; font-size: 12px; color: #aaa; }
-#canvas-wrap { flex: 1; overflow: auto; position: relative; background: #111; display: flex;
-  align-items: center; justify-content: center; }
-canvas { cursor: crosshair; }
+#canvas-wrap { flex: 1; overflow: auto; position: relative; background: #111; }
+canvas { cursor: crosshair; display: block; }
 #box-info { background: #16213e; padding: 8px 16px; font-size: 12px; min-height: 32px; }
 </style>
 </head>
@@ -139,9 +169,13 @@ canvas { cursor: crosshair; }
     <button id="btn-prev">&larr; Prev</button>
     <button id="btn-next">Next &rarr;</button>
     <select id="class-select"></select>
+    <input id="new-class-input" type="text" placeholder="new class name" style="padding:4px 8px;border-radius:4px;font-size:13px;width:130px;border:1px solid #555;background:#222;color:#eee;">
+    <button id="btn-add-class" style="padding:6px 10px;border:none;border-radius:4px;cursor:pointer;font-size:13px;background:#6c5ce7;color:#fff;">+ Class</button>
     <button id="btn-add">+ Draw Box</button>
     <button id="btn-delete">Delete Selected</button>
+    <button id="btn-undo">Undo</button>
     <button id="btn-save">Save</button>
+    <button id="btn-del-img" style="background:#636e72;color:#fff;margin-left:12px;">Delete Image</button>
     <span id="status"></span>
   </div>
   <div id="canvas-wrap">
@@ -153,6 +187,7 @@ canvas { cursor: crosshair; }
 <script>
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
+const canvasWrap = document.getElementById('canvas-wrap');
 const imageList = document.getElementById('image-list');
 const classSelect = document.getElementById('class-select');
 const boxInfo = document.getElementById('box-info');
@@ -166,8 +201,25 @@ let labelData = null;
 let selectedBox = -1;
 let drawMode = false;
 
-let drag = null;  // {type: 'move'|'resize', boxIdx, corner, startX, startY, origBox}
+let drag = null;
 let drawStart = null;
+
+let scale = 1;  // CSS pixels per image pixel
+let undoStack = [];
+const MAX_UNDO = 50;
+
+function pushUndo() {
+  undoStack.push(JSON.stringify(labelData.objects));
+  if (undoStack.length > MAX_UNDO) undoStack.shift();
+}
+
+function doUndo() {
+  if (undoStack.length === 0) return;
+  labelData.objects = JSON.parse(undoStack.pop());
+  selectedBox = -1;
+  draw();
+  status.textContent = `Undo (${undoStack.length} left)`;
+}
 
 const HANDLE = 7;
 const COLORS = [
@@ -207,6 +259,7 @@ async function loadImage(idx) {
   currentIdx = idx;
   selectedBox = -1;
   drawMode = false;
+  undoStack = [];
   renderImageList();
   const name = images[idx];
   status.textContent = `Loading ${name}...`;
@@ -214,54 +267,67 @@ async function loadImage(idx) {
   const img = new Image();
   img.onload = async () => {
     currentImage = img;
-    canvas.width = img.width;
-    canvas.height = img.height;
+    // Fit canvas to container while preserving aspect ratio
+    const wrapRect = canvasWrap.getBoundingClientRect();
+    const scaleX = wrapRect.width / img.width;
+    const scaleY = wrapRect.height / img.height;
+    scale = Math.min(scaleX, scaleY, 1);
+    // Canvas internal resolution = display resolution (1:1 CSS pixel mapping)
+    const displayW = Math.floor(img.width * scale);
+    const displayH = Math.floor(img.height * scale);
+    canvas.width = displayW;
+    canvas.height = displayH;
+    canvas.style.width = displayW + 'px';
+    canvas.style.height = displayH + 'px';
+
     const data = await fetch(`/api/labels/${name}`).then(r => r.json());
     labelData = data;
     if (!labelData.width) labelData.width = img.width;
     if (!labelData.height) labelData.height = img.height;
     if (!labelData.objects) labelData.objects = [];
     draw();
-    status.textContent = `${name} — ${labelData.objects.length} boxes`;
+    status.textContent = `${name} — ${labelData.objects.length} boxes (${img.width}x${img.height}, scale ${scale.toFixed(2)})`;
   };
   img.src = `/screenshots/${name}`;
 }
 
+function s(v) { return v * scale; }  // scale image coord to canvas coord
+function u(v) { return v / scale; }  // unscale canvas coord to image coord
+
 function draw() {
   if (!currentImage) return;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.drawImage(currentImage, 0, 0);
+  ctx.drawImage(currentImage, 0, 0, canvas.width, canvas.height);
 
   (labelData.objects || []).forEach((obj, i) => {
     const [x1, y1, x2, y2] = obj.bbox_xyxy;
-    const w = x2 - x1, h = y2 - y1;
+    const sx1 = s(x1), sy1 = s(y1), sw = s(x2 - x1), sh = s(y2 - y1);
     const color = colorFor(obj.class);
     const isSel = i === selectedBox;
 
     ctx.strokeStyle = color;
     ctx.lineWidth = isSel ? 3 : 2;
-    ctx.strokeRect(x1, y1, w, h);
+    ctx.strokeRect(sx1, sy1, sw, sh);
 
-    // label background
     const label = `${obj.class}${obj.text ? ': ' + obj.text.slice(0, 20) : ''}`;
-    ctx.font = '12px system-ui';
+    ctx.font = `${Math.max(10, Math.floor(12 * scale))}px system-ui`;
     const tm = ctx.measureText(label);
-    const lh = 16;
+    const lh = Math.max(12, Math.floor(16 * scale));
     ctx.fillStyle = color;
     ctx.globalAlpha = 0.85;
-    ctx.fillRect(x1, y1 - lh - 2, tm.width + 8, lh + 2);
+    ctx.fillRect(sx1, sy1 - lh - 2, tm.width + 8, lh + 2);
     ctx.globalAlpha = 1;
     ctx.fillStyle = '#fff';
-    ctx.fillText(label, x1 + 4, y1 - 4);
+    ctx.fillText(label, sx1 + 4, sy1 - 4);
 
     if (isSel) {
-      // draw resize handles
       ctx.fillStyle = '#fff';
       ctx.strokeStyle = '#000';
       ctx.lineWidth = 1;
       for (const [hx, hy] of corners(obj)) {
-        ctx.fillRect(hx - HANDLE/2, hy - HANDLE/2, HANDLE, HANDLE);
-        ctx.strokeRect(hx - HANDLE/2, hy - HANDLE/2, HANDLE, HANDLE);
+        const shx = s(hx), shy = s(hy);
+        ctx.fillRect(shx - HANDLE/2, shy - HANDLE/2, HANDLE, HANDLE);
+        ctx.strokeRect(shx - HANDLE/2, shy - HANDLE/2, HANDLE, HANDLE);
       }
     }
   });
@@ -280,8 +346,9 @@ function corners(obj) {
 }
 
 function hitCorner(obj, mx, my) {
+  const tolerance = HANDLE / scale;
   for (const [i, [hx, hy]] of corners(obj).entries()) {
-    if (Math.abs(mx - hx) <= HANDLE && Math.abs(my - hy) <= HANDLE) return i;
+    if (Math.abs(mx - hx) <= tolerance && Math.abs(my - hy) <= tolerance) return i;
   }
   return -1;
 }
@@ -295,10 +362,16 @@ function hitBox(mx, my) {
   return -1;
 }
 
-canvas.addEventListener('mousedown', e => {
+function canvasCoords(e) {
   const rect = canvas.getBoundingClientRect();
-  const sx = canvas.width / rect.width, sy = canvas.height / rect.height;
-  const mx = (e.clientX - rect.left) * sx, my = (e.clientY - rect.top) * sy;
+  // Convert mouse position to image coordinates (not canvas pixels)
+  const canvasX = (e.clientX - rect.left) * (canvas.width / rect.width);
+  const canvasY = (e.clientY - rect.top) * (canvas.height / rect.height);
+  return { x: u(canvasX), y: u(canvasY) };
+}
+
+canvas.addEventListener('mousedown', e => {
+  const {x: mx, y: my} = canvasCoords(e);
 
   if (drawMode) {
     drawStart = {x: mx, y: my};
@@ -309,6 +382,7 @@ canvas.addEventListener('mousedown', e => {
   if (selectedBox >= 0 && selectedBox < (labelData.objects||[]).length) {
     const corner = hitCorner(labelData.objects[selectedBox], mx, my);
     if (corner >= 0) {
+      pushUndo();
       drag = {type: 'resize', boxIdx: selectedBox, corner,
               startX: mx, startY: my,
               origBox: [...labelData.objects[selectedBox].bbox_xyxy]};
@@ -320,6 +394,7 @@ canvas.addEventListener('mousedown', e => {
   if (hit >= 0) {
     selectedBox = hit;
     classSelect.value = labelData.objects[hit].class;
+    pushUndo();
     drag = {type: 'move', boxIdx: hit,
             startX: mx, startY: my,
             origBox: [...labelData.objects[hit].bbox_xyxy]};
@@ -332,16 +407,14 @@ canvas.addEventListener('mousedown', e => {
 });
 
 canvas.addEventListener('mousemove', e => {
-  const rect = canvas.getBoundingClientRect();
-  const sx = canvas.width / rect.width, sy = canvas.height / rect.height;
-  const mx = (e.clientX - rect.left) * sx, my = (e.clientY - rect.top) * sy;
+  const {x: mx, y: my} = canvasCoords(e);
 
   if (drawMode && drawStart) {
     draw();
     ctx.strokeStyle = '#fff';
     ctx.lineWidth = 2;
     ctx.setLineDash([5, 5]);
-    ctx.strokeRect(drawStart.x, drawStart.y, mx - drawStart.x, my - drawStart.y);
+    ctx.strokeRect(s(drawStart.x), s(drawStart.y), s(mx - drawStart.x), s(my - drawStart.y));
     ctx.setLineDash([]);
     return;
   }
@@ -370,14 +443,13 @@ canvas.addEventListener('mousemove', e => {
 
 canvas.addEventListener('mouseup', e => {
   if (drawMode && drawStart) {
-    const rect = canvas.getBoundingClientRect();
-    const sx = canvas.width / rect.width, sy = canvas.height / rect.height;
-    const mx = (e.clientX - rect.left) * sx, my = (e.clientY - rect.top) * sy;
+    const {x: mx, y: my} = canvasCoords(e);
     const x1 = Math.round(Math.min(drawStart.x, mx));
     const y1 = Math.round(Math.min(drawStart.y, my));
     const x2 = Math.round(Math.max(drawStart.x, mx));
     const y2 = Math.round(Math.max(drawStart.y, my));
     if (x2 - x1 > 5 && y2 - y1 > 5) {
+      pushUndo();
       const cls = classSelect.value || classes[0];
       labelData.objects.push({
         id: `obj-${labelData.objects.length + 1}`,
@@ -389,9 +461,10 @@ canvas.addEventListener('mouseup', e => {
       selectedBox = labelData.objects.length - 1;
     }
     drawStart = null;
-    drawMode = false;
-    document.getElementById('btn-add').style.background = '#e17055';
+    // Stay in draw mode so user can keep drawing boxes continuously.
+    // Press N or click the button to exit draw mode.
     draw();
+    status.textContent = `Box added (${labelData.objects.length} total) — keep drawing, or press N to stop`;
     return;
   }
   if (drag) {
@@ -407,12 +480,16 @@ canvas.addEventListener('mouseup', e => {
 // toolbar buttons
 document.getElementById('btn-add').onclick = () => {
   drawMode = !drawMode;
+  selectedBox = -1;
   document.getElementById('btn-add').style.background = drawMode ? '#d63031' : '#e17055';
-  document.getElementById('btn-add').textContent = drawMode ? 'Drawing... (click+drag)' : '+ Draw Box';
+  document.getElementById('btn-add').textContent = drawMode ? 'Drawing (N to stop)' : '+ Draw (N)';
+  status.textContent = drawMode ? 'Draw mode ON — click+drag to draw boxes' : 'Draw mode OFF';
+  draw();
 };
 
 document.getElementById('btn-delete').onclick = () => {
   if (selectedBox >= 0 && labelData.objects) {
+    pushUndo();
     labelData.objects.splice(selectedBox, 1);
     selectedBox = -1;
     draw();
@@ -440,14 +517,63 @@ document.getElementById('btn-next').onclick = () => {
 
 classSelect.onchange = () => {
   if (selectedBox >= 0 && labelData.objects[selectedBox]) {
+    pushUndo();
     labelData.objects[selectedBox].class = classSelect.value;
     draw();
   }
 };
 
+document.getElementById('btn-undo').onclick = () => doUndo();
+
+document.getElementById('btn-del-img').onclick = async () => {
+  if (currentIdx < 0 || !images[currentIdx]) return;
+  const name = images[currentIdx];
+  if (!confirm(`Delete "${name}" and its labels? This cannot be undone.`)) return;
+  const resp = await fetch(`/api/images/${name}`, {method: 'DELETE'});
+  const result = await resp.json();
+  if (result.ok) {
+    images.splice(currentIdx, 1);
+    if (currentIdx >= images.length) currentIdx = images.length - 1;
+    renderImageList();
+    if (images.length > 0) loadImage(currentIdx);
+    else { ctx.clearRect(0, 0, canvas.width, canvas.height); status.textContent = 'No images left'; }
+    status.textContent = `Deleted ${name}`;
+  }
+};
+
+document.getElementById('btn-add-class').onclick = async () => {
+  const input = document.getElementById('new-class-input');
+  const name = input.value.trim().replace(/\s+/g, '_');
+  if (!name) return;
+  const resp = await fetch('/api/classes', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({class: name}),
+  });
+  const result = await resp.json();
+  if (result.ok) {
+    classes = result.classes;
+    classSelect.innerHTML = classes.map(c => `<option value="${c}">${c}</option>`).join('');
+    classSelect.value = name;
+    input.value = '';
+    status.textContent = `Class "${name}" added`;
+    if (selectedBox >= 0 && labelData.objects[selectedBox]) {
+      pushUndo();
+      labelData.objects[selectedBox].class = name;
+      draw();
+    }
+  }
+};
+
+document.getElementById('new-class-input').addEventListener('keydown', e => {
+  e.stopPropagation();
+  if (e.key === 'Enter') document.getElementById('btn-add-class').click();
+});
+
 // keyboard shortcuts
 document.addEventListener('keydown', e => {
-  if (e.key === 'ArrowLeft' || e.key === '[') document.getElementById('btn-prev').click();
+  if (e.key === 'z' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); doUndo(); }
+  else if (e.key === 'ArrowLeft' || e.key === '[') document.getElementById('btn-prev').click();
   else if (e.key === 'ArrowRight' || e.key === ']') document.getElementById('btn-next').click();
   else if (e.key === 'Delete' || e.key === 'Backspace') document.getElementById('btn-delete').click();
   else if (e.key === 's' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); document.getElementById('btn-save').click(); }
